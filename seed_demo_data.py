@@ -10,14 +10,16 @@ import os
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv('/etc/cloud-security-platform.env')
+load_dotenv()  # also try local .env as fallback
 
 conn = psycopg2.connect(
     host=os.getenv("DB_HOST", "localhost"),
     port=os.getenv("DB_PORT", "5432"),
     dbname=os.getenv("DB_NAME", "cloud_security_platform"),
     user=os.getenv("DB_USER", "platform_admin"),
-    password=os.getenv("DB_PASSWORD", "localdev123"),
+    password=os.getenv("DB_PASSWORD", ""),
+    sslmode="require" if os.getenv("DB_HOST", "localhost") != "localhost" else "prefer",
 )
 cur = conn.cursor()
 
