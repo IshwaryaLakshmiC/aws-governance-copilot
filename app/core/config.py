@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # OpenRouter fallback
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
-    openrouter_model:   str = "mistralai/mistral-7b-instruct:free"
+    openrouter_model:   str = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 
     # S3
     s3_cache_bucket: str = os.getenv("S3_CACHE_BUCKET", "")
