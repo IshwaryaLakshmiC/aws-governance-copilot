@@ -15,17 +15,36 @@ class LLMClient:
         try:
             return await self._bedrock_complete(system, messages, max_tokens)
         except Exception as e:
-            print(f"Bedrock failed ({e}), falling back to OpenRouter")
-            return await self._openrouter_complete(system, messages, max_tokens)
+            print(f"Bedrock failed ({e}), trying Gemini")
+            try:
+                return await self._gemini_complete(system, messages, max_tokens)
+            except Exception as e2:
+                print(f"Gemini failed ({e2}), falling back to OpenRouter")
+                return await self._openrouter_complete(system, messages, max_tokens)
 
     async def stream(self, system: str, messages: list[dict], max_tokens: int = 2000) -> AsyncGenerator[str, None]:
         try:
+            got_any = False
             async for chunk in self._bedrock_stream(system, messages, max_tokens):
+                got_any = True
                 yield chunk
+            if got_any:
+                return
+            raise Exception("Bedrock stream produced no content")
         except Exception as e:
-            print(f"Bedrock stream failed ({e}), falling back to OpenRouter")
-            async for chunk in self._openrouter_stream(system, messages, max_tokens):
+            print(f"Bedrock stream failed ({e}), trying Gemini")
+        try:
+            got_any = False
+            async for chunk in self._gemini_stream(system, messages, max_tokens):
+                got_any = True
                 yield chunk
+            if got_any:
+                return
+            raise Exception("Gemini stream produced no content")
+        except Exception as e2:
+            print(f"Gemini stream failed ({e2}), falling back to OpenRouter")
+        async for chunk in self._openrouter_stream(system, messages, max_tokens):
+            yield chunk
 
     async def _bedrock_complete(self, system, messages, max_tokens) -> str:
         body = json.dumps({
@@ -63,6 +82,50 @@ class LLMClient:
                 data = json.loads(chunk["bytes"])
                 if data.get("type") == "content_block_delta":
                     yield data.get("delta", {}).get("text", "")
+
+    async def _gemini_complete(self, system, messages, max_tokens) -> str:
+        gemini_contents = self._to_gemini_format(messages)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent?key={settings.gemini_api_key}"
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json={
+                "contents": gemini_contents,
+                "systemInstruction": {"parts": [{"text": system}]},
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
+            }, timeout=60.0)
+            if resp.status_code != 200:
+                raise Exception(f"Gemini HTTP {resp.status_code}: {resp.text[:300]}")
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    async def _gemini_stream(self, system, messages, max_tokens) -> AsyncGenerator[str, None]:
+        gemini_contents = self._to_gemini_format(messages)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:streamGenerateContent?key={settings.gemini_api_key}&alt=sse"
+        async with httpx.AsyncClient() as client:
+            async with client.stream("POST", url, json={
+                "contents": gemini_contents,
+                "systemInstruction": {"parts": [{"text": system}]},
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2},
+            }, timeout=60.0) as resp:
+                if resp.status_code != 200:
+                    error_body = await resp.aread()
+                    raise Exception(f"Gemini HTTP {resp.status_code}: {error_body.decode(errors='ignore')[:300]}")
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        try:
+                            data = json.loads(line[6:])
+                            text = data["candidates"][0]["content"]["parts"][0].get("text", "")
+                            if text:
+                                yield text
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            pass
+
+    def _to_gemini_format(self, messages: list[dict]) -> list[dict]:
+        """Gemini uses 'model' instead of 'assistant' and a different shape"""
+        out = []
+        for m in messages:
+            role = "model" if m["role"] == "assistant" else "user"
+            out.append({"role": role, "parts": [{"text": m["content"]}]})
+        return out
 
     async def _openrouter_complete(self, system, messages, max_tokens) -> str:
         async with httpx.AsyncClient() as client:
