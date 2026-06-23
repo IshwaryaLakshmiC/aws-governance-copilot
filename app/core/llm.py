@@ -15,12 +15,16 @@ class LLMClient:
         try:
             return await self._bedrock_complete(system, messages, max_tokens)
         except Exception as e:
-            print(f"Bedrock failed ({e}), trying Gemini")
+            print(f"Bedrock failed ({e}), trying Groq")
             try:
-                return await self._gemini_complete(system, messages, max_tokens)
+                return await self._groq_complete(system, messages, max_tokens)
             except Exception as e2:
-                print(f"Gemini failed ({e2}), falling back to OpenRouter")
-                return await self._openrouter_complete(system, messages, max_tokens)
+                print(f"Groq failed ({e2}), trying Gemini")
+                try:
+                    return await self._gemini_complete(system, messages, max_tokens)
+                except Exception as e3:
+                    print(f"Gemini failed ({e3}), falling back to OpenRouter")
+                    return await self._openrouter_complete(system, messages, max_tokens)
 
     async def stream(self, system: str, messages: list[dict], max_tokens: int = 2000) -> AsyncGenerator[str, None]:
         try:
@@ -32,7 +36,17 @@ class LLMClient:
                 return
             raise Exception("Bedrock stream produced no content")
         except Exception as e:
-            print(f"Bedrock stream failed ({e}), trying Gemini")
+            print(f"Bedrock stream failed ({e}), trying Groq")
+        try:
+            got_any = False
+            async for chunk in self._groq_stream(system, messages, max_tokens):
+                got_any = True
+                yield chunk
+            if got_any:
+                return
+            raise Exception("Groq stream produced no content")
+        except Exception as e2:
+            print(f"Groq stream failed ({e2}), trying Gemini")
         try:
             got_any = False
             async for chunk in self._gemini_stream(system, messages, max_tokens):
@@ -41,10 +55,45 @@ class LLMClient:
             if got_any:
                 return
             raise Exception("Gemini stream produced no content")
-        except Exception as e2:
-            print(f"Gemini stream failed ({e2}), falling back to OpenRouter")
+        except Exception as e3:
+            print(f"Gemini stream failed ({e3}), falling back to OpenRouter")
         async for chunk in self._openrouter_stream(system, messages, max_tokens):
             yield chunk
+
+    async def _groq_complete(self, system, messages, max_tokens) -> str:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+                json={"model": settings.groq_model, "max_tokens": max_tokens,
+                      "messages": [{"role": "system", "content": system}] + messages},
+                timeout=60.0
+            )
+            if resp.status_code != 200:
+                raise Exception(f"Groq HTTP {resp.status_code}: {resp.text[:300]}")
+            return resp.json()["choices"][0]["message"]["content"]
+
+    async def _groq_stream(self, system, messages, max_tokens) -> AsyncGenerator[str, None]:
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "POST", "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+                json={"model": settings.groq_model, "max_tokens": max_tokens, "stream": True,
+                      "messages": [{"role": "system", "content": system}] + messages},
+                timeout=60.0
+            ) as resp:
+                if resp.status_code != 200:
+                    error_body = await resp.aread()
+                    raise Exception(f"Groq HTTP {resp.status_code}: {error_body.decode(errors='ignore')[:300]}")
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: ") and line != "data: [DONE]":
+                        try:
+                            data = json.loads(line[6:])
+                            content = data["choices"][0].get("delta", {}).get("content", "")
+                            if content:
+                                yield content
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            pass
 
     async def _bedrock_complete(self, system, messages, max_tokens) -> str:
         body = json.dumps({

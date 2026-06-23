@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
     openrouter_model:   str = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 
+    # Groq fallback (tried first, before Gemini and OpenRouter)
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    groq_model:   str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
     # Gemini fallback (tried before OpenRouter)
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model:   str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
