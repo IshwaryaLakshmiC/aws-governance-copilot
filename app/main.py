@@ -4,8 +4,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import json, asyncio, os
+import json, asyncio, os, uuid
 from app.core.config import get_settings
+from app.core.database import execute
 from app.engines.chat import ChatEngine, get_stats, get_recent_findings, get_cost_summary
 from app.collectors.aws_collectors import run_all_collectors
 
@@ -25,6 +26,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     question: str
     history: list[dict] = []
+    session_id: str | None = None
 
 
 class CollectRequest(BaseModel):
@@ -72,12 +74,41 @@ async def trigger_collection(req: CollectRequest):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    """Streaming chat — SSE"""
+    """Streaming chat — SSE. Persists conversation to RDS so a refresh
+    or service restart doesn't lose the demo conversation."""
+    session_id = req.session_id or str(uuid.uuid4())
+
+    execute("""
+        INSERT INTO governance_chat_history (session_id, role, content, created_at)
+        VALUES (%s, 'user', %s, NOW())
+    """, (session_id, req.question))
+
     async def generate():
+        full_response = ""
+        yield f"data: {json.dumps({'session_id': session_id})}\n\n"
+
         async for chunk in chat_engine.stream(req.question, req.history):
+            full_response += chunk
             yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+
+        execute("""
+            INSERT INTO governance_chat_history (session_id, role, content, created_at)
+            VALUES (%s, 'assistant', %s, NOW())
+        """, (session_id, full_response))
+
         yield f"data: {json.dumps({'done': True})}\n\n"
+
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.get("/api/chat/{session_id}/history")
+async def get_chat_history(session_id: str):
+    """Retrieve a past conversation — survives restarts since it reads from RDS"""
+    rows = execute("""
+        SELECT role, content, created_at FROM governance_chat_history
+        WHERE session_id = %s ORDER BY id ASC
+    """, (session_id,), fetch=True)
+    return {"session_id": session_id, "messages": rows}
 
 
 # Serve frontend at /ui
