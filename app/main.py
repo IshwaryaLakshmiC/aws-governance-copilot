@@ -72,6 +72,31 @@ async def trigger_collection(req: CollectRequest):
     return {"status": "collection triggered", "service": req.service}
 
 
+class ExplainRequest(BaseModel):
+    prompt: str
+
+
+@app.post("/api/explain")
+async def explain(req: ExplainRequest):
+    """Lightweight one-shot explanation endpoint, reused by the ZTNA Simulator
+    for its AI Explanation panel. Uses the same Bedrock -> Groq -> Gemini ->
+    OpenRouter fallback chain as the chat endpoint, but without RAG context
+    or conversation history — just a single prompt in, single answer out.
+    Kept here rather than as a separate service so the ZTNA simulator (a
+    static frontend with no backend of its own) has somewhere reliable
+    to call without standing up a fourth EC2 service."""
+    try:
+        explanation = await chat_engine.llm.complete(
+            system="You are a Zero Trust security expert. Be concise, direct, and non-technical-manager-friendly.",
+            messages=[{"role": "user", "content": req.prompt}],
+            max_tokens=200,
+        )
+        return {"explanation": explanation}
+    except Exception as e:
+        print(f"/api/explain failed: {e}")
+        return {"explanation": None, "error": str(e)}
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     """Streaming chat — SSE. Persists conversation to RDS so a refresh
